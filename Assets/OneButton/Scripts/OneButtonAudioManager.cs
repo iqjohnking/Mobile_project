@@ -2,6 +2,8 @@ using UnityEngine;
 
 public sealed class OneButtonAudioManager : MonoBehaviour
 {
+    public static OneButtonAudioManager Instance { get; private set; }
+
     [Header("Audio Sources")]
     [SerializeField] private AudioSource bgmSource;
     [SerializeField] private AudioSource seSource;
@@ -23,6 +25,15 @@ public sealed class OneButtonAudioManager : MonoBehaviour
 
     private void Awake()
     {
+        if (Instance != null && Instance != this)
+        {
+            Destroy(gameObject);
+            return;
+        }
+
+        Instance = this;
+        DontDestroyOnLoad(gameObject);
+
         ConfigureSource(bgmSource, bgmClip, true, 0.08f);
         ConfigureSource(seSource, null, false, 1f);
         ConfigureSource(heartbeatSlowSource, heartbeatSlowClip, true, 1.2f);
@@ -30,6 +41,14 @@ public sealed class OneButtonAudioManager : MonoBehaviour
         ConfigureSource(stepSource, stepClip, true, 1.2f);
         ConfigureSource(warningSource, warningClip, true, 0.7f);
         ConfigureSource(closeSource, closeClip, true, 0.7f);
+    }
+
+    private void OnDestroy()
+    {
+        if (Instance == this)
+        {
+            Instance = null;
+        }
     }
 
     public void PlayBgm() => PlayLoop(bgmSource);

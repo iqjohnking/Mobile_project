@@ -1,12 +1,18 @@
+using System.Collections;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.UI;
+using UnityEngine.SceneManagement;
 using UnityEngine.UI;
+using StandaloneInputModule = UnityEngine.EventSystems.StandaloneInputModule;
 
 public sealed class OneButtonGamePrefabVer : MonoBehaviour
 {
     [Header("Timing")]
     [SerializeField] private Vector2 deadRangeFrames = new Vector2(400f, 700f);
     [SerializeField] private float restartHoldSeconds = 3f;
+    [SerializeField] private string titleSceneName = "TitleScene";
 
     [Header("View References")]
     [SerializeField] private Image backgroundImage;
@@ -15,6 +21,7 @@ public sealed class OneButtonGamePrefabVer : MonoBehaviour
     [SerializeField] private Image bigGhostImage;
     [SerializeField] private Image attackImage;
     [SerializeField] private Image resultTextImage;
+    [SerializeField] private Button returnToTitleButton;
 
     [Header("Sprite Frames")]
     [SerializeField] private OneButtonSpriteFrames backgroundFrames;
@@ -28,6 +35,8 @@ public sealed class OneButtonGamePrefabVer : MonoBehaviour
     private const float FramesPerSecond = 60f;
     private const float AttackDuration = 200f / FramesPerSecond;
     private const float GameOverPromptDelay = 240f / FramesPerSecond;
+    private const int OpenEyeFrame = 14;
+    private const int ClosedEyeFrame = 0;
 
     private float range;
     private float deadRange;
@@ -40,14 +49,17 @@ public sealed class OneButtonGamePrefabVer : MonoBehaviour
     private float gameOverTimer;
     private float attackTimer;
     private float backgroundTimer;
-    private float eyeFrameValue = 14f;
+    private float currentEyeFrameValue = OpenEyeFrame;
     private int backgroundFrame;
-    private int eyeFrame = 14;
+    private int currentEyeFrame = OpenEyeFrame;
+    private bool introTransitionActive = true;
+    private bool isReturningToTitle;
 
     private void Awake()
     {
         Screen.orientation = ScreenOrientation.LandscapeLeft;
 
+        // 参照が設定されていない場合は、シーン内のオブジェクトを検索して自動的にバインドする。
         BindMissingReferences();
         if (!HasRequiredReferences())
         {
@@ -56,8 +68,12 @@ public sealed class OneButtonGamePrefabVer : MonoBehaviour
         }
 
         ConfigureCamera();
+        EnsureUiEventSystem();
+        EnsureCanvasIsInteractive();
+        BindReturnToTitleButton();
 
         deadRange = 500f;
+        SetEyeFrame(ClosedEyeFrame);
         ResetRoundVisuals();
 
         audioManager.PlayBgm();
@@ -77,7 +93,25 @@ public sealed class OneButtonGamePrefabVer : MonoBehaviour
         smallGhostFrames ??= FindSpriteFrames("Small Ghost Image");
         resultTextFrames ??= FindSpriteFrames("Result Text Image");
 
-        audioManager ??= FindFirstObjectByType<OneButtonAudioManager>(FindObjectsInactive.Include);
+        // AudioManagerの参照を取得する。
+        // OneButtonAudioManagerがシーンに存在しない場合は、非アクティブなオブジェクトも含めて検索する。
+        audioManager = OneButtonAudioManager.Instance != null
+            ? OneButtonAudioManager.Instance
+            : FindFirstObjectByType<OneButtonAudioManager>(FindObjectsInactive.Include);
+        returnToTitleButton ??= FindButton("ReturnToTitleButton");
+    }
+
+    private static Button FindButton(string objectName)
+    {
+        foreach (Button button in FindObjectsByType<Button>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (button.gameObject.name == objectName)
+            {
+                return button;
+            }
+        }
+
+        return null;
     }
 
     private static Image FindImage(string objectName)
@@ -144,13 +178,32 @@ public sealed class OneButtonGamePrefabVer : MonoBehaviour
 
     private void Update()
     {
-        bool isPressed = IsButtonPressed();
-        bool canUsePress = !isGameOver || gameOverPromptPlayed;
         float frameDelta = Time.deltaTime * FramesPerSecond;
 
         AnimateBackground();
-        AnimateClosedEye(isPressed && canUsePress, frameDelta);
         UpdateAttack();
+
+        if (isReturningToTitle)
+        {
+            return;
+        }
+
+        if (introTransitionActive)
+        {
+            AnimateClosedEye(false, frameDelta);
+            if (currentEyeFrame >= OpenEyeFrame)
+            {
+                introTransitionActive = false;
+            }
+
+            wasPressed = false;
+            return;
+        }
+
+        bool isPressed = IsButtonPressed();
+        bool canUsePress = !isGameOver || gameOverPromptPlayed;
+
+        AnimateClosedEye(isPressed && canUsePress, frameDelta);
 
         if (isPressed && canUsePress)
         {
@@ -230,6 +283,11 @@ public sealed class OneButtonGamePrefabVer : MonoBehaviour
             audioManager.PlayAttack();
         }
 
+        if (gameOverPromptPlayed && returnToTitleButton != null)
+        {
+            returnToTitleButton.gameObject.SetActive(true);
+        }
+
         if (isPressed && range >= restartHoldSeconds * FramesPerSecond && !restartPromptPlayed)
         {
             gameOverTimer = 0f;
@@ -240,13 +298,24 @@ public sealed class OneButtonGamePrefabVer : MonoBehaviour
 
         if (wasPressed && !isPressed && range > restartHoldSeconds * FramesPerSecond)
         {
-            isGameOver = false;
-            range = 0f;
-            deadRange = Random.Range(deadRangeFrames.x, deadRangeFrames.y);
-            bigGhostImage.gameObject.SetActive(false);
-            resultTextImage.gameObject.SetActive(false);
-            gameOverPromptPlayed = false;
-            restartPromptPlayed = false;
+            RestartRoundInScene();
+        }
+    }
+
+    private void RestartRoundInScene()
+    {
+        isGameOver = false;
+        range = 0f;
+        deadRange = Random.Range(deadRangeFrames.x, deadRangeFrames.y);
+        bigGhostImage.gameObject.SetActive(false);
+        resultTextImage.gameObject.SetActive(false);
+        gameOverPromptPlayed = false;
+        restartPromptPlayed = false;
+
+        if (returnToTitleButton != null)
+        {
+            returnToTitleButton.gameObject.SetActive(false);
+            returnToTitleButton.interactable = true;
         }
     }
 
@@ -266,15 +335,18 @@ public sealed class OneButtonGamePrefabVer : MonoBehaviour
     private void AnimateClosedEye(bool isPressed, float frameDelta)
     {
         int direction = isPressed ? -1 : 1;
-        eyeFrameValue = Mathf.Clamp(eyeFrameValue + direction * frameDelta, 0f, 14f);
-        int nextFrame = Mathf.RoundToInt(eyeFrameValue);
-        if (nextFrame == eyeFrame)
+        currentEyeFrameValue = Mathf.Clamp(
+            currentEyeFrameValue + direction * frameDelta,
+            ClosedEyeFrame,
+            OpenEyeFrame);
+
+        int nextFrame = Mathf.RoundToInt(currentEyeFrameValue);
+        if (nextFrame == currentEyeFrame)
         {
             return;
         }
 
-        eyeFrame = nextFrame;
-        closedEyeFrames.SetFrame(eyeFrame);
+        SetEyeFrame(nextFrame);
     }
 
     private void UpdateAttack()
@@ -312,9 +384,10 @@ public sealed class OneButtonGamePrefabVer : MonoBehaviour
 
     private void ShowResultTextFrame(int frame, Vector2 size)
     {
+        // SerActive()を呼び出しとき、中身のSetFrame(0)が呼ばれるため、SetFrame()の前にを呼び出さないといけない
+        resultTextImage.gameObject.SetActive(true);  
         resultTextFrames.SetFrame(frame);
         resultTextImage.rectTransform.sizeDelta = size;
-        resultTextImage.gameObject.SetActive(true);
     }
 
     private void PlayChargeCue(float result)
@@ -354,13 +427,127 @@ public sealed class OneButtonGamePrefabVer : MonoBehaviour
     private void ResetRoundVisuals()
     {
         backgroundFrames.SetFrame(0);
-        closedEyeFrames.SetFrame(eyeFrame);
+        closedEyeFrames.SetFrame(currentEyeFrame);
         resultTextFrames.SetFrame(2);
 
         smallGhostImage.gameObject.SetActive(false);
         bigGhostImage.gameObject.SetActive(false);
         attackImage.gameObject.SetActive(false);
         resultTextImage.gameObject.SetActive(false);
+
+        if (returnToTitleButton != null)
+        {
+            returnToTitleButton.gameObject.SetActive(false);
+            returnToTitleButton.interactable = true;
+        }
+    }
+
+    private void BindReturnToTitleButton()
+    {
+        if (returnToTitleButton == null)
+        {
+            return;
+        }
+
+        returnToTitleButton.onClick.RemoveListener(ReturnToTitleScene);
+        returnToTitleButton.onClick.AddListener(ReturnToTitleScene);
+        returnToTitleButton.gameObject.SetActive(false);
+    }
+
+    private void ReturnToTitleScene()
+    {
+        if (isReturningToTitle)
+        {
+            return;
+        }
+        isReturningToTitle = true;
+
+        // 音を止める
+        StopChargeCue(); 
+
+        // ボタンを無効化して二重クリックを防ぐ
+        if (returnToTitleButton != null)
+        {
+            returnToTitleButton.interactable = false;
+        }
+
+        // 目を閉じるアニメーションを再生してからタイトルシーンに遷移する
+        StartCoroutine(PlayCloseEyeAndLoadTitleScene());
+    }
+
+    private void SetEyeFrame(int frame)
+    {
+        currentEyeFrame = Mathf.Clamp(frame, ClosedEyeFrame, OpenEyeFrame);
+        currentEyeFrameValue = currentEyeFrame;
+        closedEyeFrames.SetFrame(currentEyeFrame);
+    }
+
+    private static void EnsureUiEventSystem()
+    {
+        EventSystem eventSystem = FindFirstObjectByType<EventSystem>();
+        if (eventSystem != null)
+        {
+            if (eventSystem.GetComponent<InputSystemUIInputModule>() == null)
+            {
+                eventSystem.gameObject.AddComponent<InputSystemUIInputModule>();
+            }
+
+            StandaloneInputModule standaloneInputModule = eventSystem.GetComponent<StandaloneInputModule>();
+            if (standaloneInputModule != null)
+            {
+                standaloneInputModule.enabled = false;
+            }
+
+            return;
+        }
+
+        GameObject eventSystemObject = new GameObject("EventSystem");
+        eventSystemObject.AddComponent<EventSystem>();
+        eventSystemObject.AddComponent<InputSystemUIInputModule>();
+    }
+
+    private static void EnsureCanvasIsInteractive()
+    {
+        Canvas canvas = FindFirstObjectByType<Canvas>(FindObjectsInactive.Include);
+        if (canvas == null)
+        {
+            return;
+        }
+
+        RectTransform rectTransform = canvas.transform as RectTransform;
+        if (rectTransform != null)
+        {
+            rectTransform.localScale = Vector3.one;
+        }
+
+        if (canvas.GetComponent<GraphicRaycaster>() == null)
+        {
+            canvas.gameObject.AddComponent<GraphicRaycaster>();
+        }
+    }
+
+    private IEnumerator PlayCloseEyeAndLoadTitleScene()
+    {
+        if (closedEyeFrames == null)
+        {
+            SceneManager.LoadScene(titleSceneName);
+            yield break;
+        }
+
+        if (closedEyeImage != null)
+        {
+            closedEyeImage.gameObject.SetActive(true);
+        }
+
+        float frameValue = OpenEyeFrame;
+        while (frameValue > ClosedEyeFrame)
+        {
+            frameValue = Mathf.Max(ClosedEyeFrame, frameValue - Time.deltaTime * FramesPerSecond);
+            SetEyeFrame(Mathf.RoundToInt(frameValue));
+            yield return null;
+        }
+
+        SceneManager.LoadScene(titleSceneName);
     }
 
 }
